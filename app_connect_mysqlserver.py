@@ -1,0 +1,1144 @@
+import os
+import random
+import mysql.connector
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask import jsonify, request
+from sqlalchemy import func
+from datetime import datetime
+from flask_cors import CORS
+from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from werkzeug.utils import secure_filename
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required
+
+# Initialize the Flask App
+app = Flask(__name__)
+CORS(app)
+
+#app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://root:aicams.in@ec2-40-177-97-101.ca-west-1.compute.amazonaws.com/benchmarkdata_db"
+#app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://root:aicams.in@ec2-40-177-97-101.ca-west-1.compute.amazonaws.com/benchmarkdata_db?connect_timeout=10"
+#app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+mysqlconnector://root:aicams.in@ec2-40-177-97-101.ca-west-1.compute.amazonaws.com/benchmarkdata_db"
+#app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///benchmarkdata_db.db"
+#app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:aicams.in@localhost:3306/benchmarkdata_db'
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://{}:{}@{}/{}'.format(
+    os.getenv('DB_USER', 'root'),
+    os.getenv('DB_PASSWORD', 'aicams.in'),
+    os.getenv('DB_HOST', 'localhost'), #:3306
+    os.getenv('DB_NAME', 'benchmarkdata_db')
+)
+
+db = SQLAlchemy(app)
+
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["JWT_SECRET_KEY"] = "your_secure_token"  # Change this to a secure secret in production
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1000 * 1000  # 500 MB
+app.config['UPLOAD_FOLDER'] = 'D:/flask_apis/aicams.in/var/www/html/logs/uploads'
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif', 'mp4'}
+
+def get_random_file(directory):
+    files = os.listdir(directory)
+    return os.path.join(directory, random.choice(files)) if files else None
+
+jwt = JWTManager(app)
+
+# Utility to generate random camera IDs and messages
+def generate_random_camera():
+    return f"Camera{random.randint(1, 6)}"
+
+def generate_random_message():
+    return random.choice(["Coveralls", "Boots", "Hardhat", "Gloves"])
+
+def allowed_file(filename):
+    """Check if file has allowed extension."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+# Models
+class User(db.Model):
+    userid = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(255), unique=True, nullable=False)
+    email = db.Column(db.String(255), nullable=True)
+    mob = db.Column(db.String(255), nullable=True)
+    password = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(255), nullable=True)
+    permission = db.Column(db.String(255), nullable=False)
+    company = db.Column(db.String(255), nullable=True)
+    address = db.Column(db.String(255), nullable=True)
+    status = db.Column(db.String(255), nullable=False)
+
+class Camera(db.Model):
+    camera_id = db.Column(db.String(255), primary_key=True)
+    camera_url = db.Column(db.String(255), nullable=False)
+    camera_location = db.Column(db.String(255), nullable=True)
+    status = db.Column(db.String(255), nullable=False)
+
+class Analytics(db.Model):
+    analytics_id = db.Column(db.Integer, primary_key=True)
+    log_image = db.Column(db.String(255))
+    log_video = db.Column(db.String(255))
+    create_date = db.Column(db.String(255))
+    message = db.Column(db.String(255))
+    camera_id = db.Column(db.String(255), nullable=False)
+    camera_location = db.Column(db.String(255))
+    action = db.Column(db.String(255))
+    time_to_action = db.Column(db.String(255))
+    status = db.Column(db.String(255), nullable=False)
+    user_id = db.Column(db.String(255), unique=True, nullable=False)  # user_id should match the column in the database
+
+class Subscription(db.Model):
+    subscription_id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.String(255), nullable=False)
+    machine_id = db.Column(db.String(255), nullable=False)
+    expiry_date = db.Column(db.String(255), nullable=False)
+    camera_count = db.Column(db.String(255), nullable=False)
+    ai_module = db.Column(db.String(255), nullable=False)
+    status = db.Column(db.String(255), nullable=False)
+
+class Device(db.Model):
+    device_id = db.Column(db.Integer, primary_key=True)
+    machine_id = db.Column(db.String(255), unique=True, nullable=False)
+    device_location = db.Column(db.String(255), nullable=True)
+
+# Routes
+######################################### login page #########################################
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(user_id=data["user_id"], password=data["password"]).first()
+    if user:
+        access_token = create_access_token(identity=user.user_id)
+        return jsonify({"token": access_token, "user_id": user.user_id, "status": user.status}), 200
+    return jsonify({"msg": "Invalid credentials"}), 400
+
+##################################### Register page ##########################################
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    new_user = User(
+        user_id=data["user_id"],
+        email=data["email"],
+        mob=data["mob"],
+        password=data["password"],
+        name=data["name"],
+        permission=data["permission"],
+        company=data["company"],
+        address=data["address"],
+        status=data["status"],
+    )
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"msg": "User registered successfully"}), 201
+
+##################################### Dashboard page ##########################################
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    data = request.get_json()
+
+    # Get today's date
+    today = datetime.today()
+
+    # Default start_date and end_date to today
+    start_date = today
+    end_date = today
+
+    if "start_date" in data:
+        start_date = datetime.strptime(data["start_date"], "%Y-%m-%d")
+    if "end_date" in data:
+        end_date = datetime.strptime(data["end_date"], "%Y-%m-%d")
+
+    # Range handling
+     # Handle predefined range if available (e.g., this_week, this_month, etc.)
+    range_option = data.get("range_option")
+    if range_option == "today":
+        start_date = end_date = today
+    elif range_option == "this_week":
+        start_date = today - timedelta(days=today.weekday())  # Start of the week
+        end_date = start_date + timedelta(days=6)  # End of the week
+    elif range_option == "this_month":
+        start_date = today.replace(day=1)  # First day of the month
+        end_date = (start_date + timedelta(days=31)).replace(day=1) - timedelta(days=1)  # Last day of the month
+    elif range_option == "2_months":
+        start_date = today - timedelta(days=60)
+        end_date = today
+    elif range_option == "3_months":
+        start_date = today - timedelta(days=90)
+        end_date = today
+    elif range_option == "1_year":
+        start_date = today - timedelta(days=365)
+        end_date = today
+    # Fetching Analytics and Camera Data
+    total_analytics = Analytics.query.filter(
+        Analytics.create_date >= start_date, Analytics.create_date <= end_date
+    ).count()
+
+    positive_count = Analytics.query.filter(
+        Analytics.status == "Active", Analytics.create_date >= start_date, Analytics.create_date <= end_date
+    ).count()
+
+    negative_count = Analytics.query.filter(
+        Analytics.status == "Inactive", Analytics.create_date >= start_date, Analytics.create_date <= end_date
+    ).count()
+
+    total_cameras = Camera.query.count()
+    total_active_cameras = Camera.query.filter(Camera.status == "yes").count()
+    camera_count_display = f"{total_active_cameras} / {total_cameras}"
+
+    # Most Common Observation (Message) 
+    total_messages = Analytics.query.count()  # Total rows in the Analytics table
+    message_counts = (
+        db.session.query(Analytics.message, db.func.count(Analytics.message).label("count"))
+        .group_by(Analytics.message)
+        .order_by(db.desc("count"))
+        .all()
+    )
+    most_common_message = message_counts[0] if message_counts else None
+
+    most_common_observation = {
+        "message": most_common_message[0] if most_common_message else None,
+        "count": most_common_message[1] if most_common_message else 0,
+        "percentage": round(
+            (most_common_message[1] / total_messages) * 100, 2
+        ) if most_common_message else 0,
+    }
+
+    # Most Risky Location (camera_location) 
+    total_locations = Analytics.query.count()  # Total rows in the Analytics table
+    location_counts = (
+        db.session.query(Analytics.camera_location, db.func.count(Analytics.camera_location).label("count"))
+        .group_by(Analytics.camera_location)
+        .order_by(db.desc("count"))
+        .all()
+    )
+    most_common_location = location_counts[0] if location_counts else None
+
+    most_risky_location = {
+        "location": most_common_location[0] if most_common_location else None,
+        "count": most_common_location[1] if most_common_location else 0,
+        "percentage": round(
+            (most_common_location[1] / total_locations) * 100, 2
+        ) if most_common_location else 0,
+    }
+
+    # Final Response
+    return jsonify({
+        "analytics": total_analytics,
+        "Total_Acknowledge": positive_count,
+        "Total_Pending": negative_count,
+        "camera_count": camera_count_display,
+        "most_common_observation": most_common_observation,
+        "most_risky_location": most_risky_location,
+    }), 200
+
+
+################################## analytics  page ################################################
+def fileupload(directory):
+    files = os.listdir(directory)
+    if not files:
+        return None, False  # Return None if no files are available
+    file_path = os.path.join(directory, random.choice(files))
+    return file_path, True
+
+@app.route('/analytics-action', methods=['POST'])
+def analytics_action():
+    """Handle analytics actions with image and video uploads."""
+    try:
+        if 'image' not in request.files or 'video' not in request.files:
+            return jsonify({'status': 'error', 'message': 'Image or video file not provided'}), 400
+
+        image_file = request.files['image']
+        video_file = request.files['video']
+
+        if image_file.filename == '' or video_file.filename == '':
+            return jsonify({'status': 'error', 'message': 'No selected files'}), 400
+
+        image_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'images')
+        video_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'videos')
+
+        os.makedirs(image_dir, exist_ok=True)
+        os.makedirs(video_dir, exist_ok=True)
+
+        image_path = os.path.join(image_dir, secure_filename(image_file.filename))
+        video_path = os.path.join(video_dir, secure_filename(video_file.filename))
+
+        image_file.save(image_path)
+        video_file.save(video_path)
+
+        user_id = request.form.get('user_id', 'default_user')  # Default user_id if not provided
+
+        new_action = Analytics(
+            log_image=image_path,
+            log_video=video_path,
+            create_date=str(datetime.now()),
+            message=generate_random_message(),
+            camera_id=generate_random_camera(),
+            camera_location="Location A",
+            action=request.form.get('action_text', 'Default Action'),
+            status="Action Received",
+            user_id=user_id  # Include user_id
+        )
+        db.session.add(new_action)
+        db.session.commit()
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Action added successfully',
+            'log_image': image_path.replace('\\', '/'),
+            'log_video': video_path.replace('\\', '/')
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/analytics-insertinto', methods=['POST'])
+def analytics_insertinto():
+    """Insert analytics data from predefined directories."""
+    try:
+        image_dir = r"D:/flask_apis/aicams.in/var/www/html/logs/images"
+        video_dir = r"D:/flask_apis/aicams.in/var/www/html/logs/videos"
+
+        log_image, image_uploaded = fileupload(image_dir)
+        log_video, video_uploaded = fileupload(video_dir)
+
+        if not (image_uploaded and video_uploaded):
+            return jsonify({'status': 'error', 'message': 'Files not uploaded'}), 404
+
+        user_id = request.form.get('user_id', 'testuser_02')  # Default user_id if not provided
+
+        new_record = Analytics(
+            log_image=log_image,
+            log_video=log_video,
+            create_date=str(datetime.now()),
+            message=generate_random_message(),
+            camera_id=generate_random_camera(),
+            camera_location="Location A",
+            action="New Action",
+            status="Active",
+            user_id=user_id  # Include user_id
+        )
+        db.session.add(new_record)
+        db.session.commit()
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Record inserted successfully',
+            'log_image': log_image.replace('\\', '/'),
+            'log_video': log_video.replace('\\', '/')
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/analytics-search', methods=['POST'])
+def analytics_search():
+    """Search analytics records based on parameters."""
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        # Get search parameters from the request
+        message = data.get('message')
+        camera_id = data.get('camera_id')
+        action = data.get('action')
+        status = data.get('status')
+        user_id = data.get('user_id')  # Get user_id from the request
+
+        # Start the query
+        query = Analytics.query
+
+        # Filter based on provided search parameters
+        if message:
+            query = query.filter(Analytics.message.like(f"%{message}%"))
+        if camera_id:
+            query = query.filter(Analytics.camera_id.like(f"%{camera_id}%"))
+        if action:
+            query = query.filter(Analytics.action.like(f"%{action}%"))
+        if status:
+            query = query.filter(Analytics.status.like(f"%{status}%"))
+        if user_id:  # Add filter for user_id
+            query = query.filter(Analytics.user_id == user_id)
+
+        # Get the search results
+        search_results = query.all()
+
+        # Return the search results
+        response_data = [
+            {
+                'log_image': item.log_image.replace('\\', '/'),
+                'log_video': item.log_video.replace('\\', '/'),
+                'create_date': item.create_date,
+                'message': item.message,
+                'camera_id': item.camera_id,
+                'camera_location': item.camera_location,
+                'action': item.action,
+                'status': item.status,
+                'user_id': item.user_id  # Include user_id in the response
+            }
+            for item in search_results
+        ]
+
+        return jsonify({
+            'status': 'success',
+            'data': response_data
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/analytics-report', methods=['POST'])
+def analytics_report():
+    """Generate a report of analytics data within a date range and save as a PDF."""
+    try:
+        data = request.get_json()
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+
+        # Fetch analytics data within the date range
+        report_data = Analytics.query.filter(Analytics.create_date.between(start_date, end_date)).all()
+
+        # Directory to save the PDF
+        pdf_dir = r"D:\flask_apis\aicams.in\var\www\html\logs\pdfs"
+        os.makedirs(pdf_dir, exist_ok=True)
+
+        # Generate PDF file name
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_path = os.path.join(pdf_dir, f"analytics_report_{timestamp}.pdf")
+
+        # Create the PDF
+        c = canvas.Canvas(pdf_path, pagesize=letter)
+        c.setFont("Helvetica", 12)
+        c.drawString(100, 750, "Analytics Report")
+        c.drawString(100, 730, f"Date Range: {start_date} to {end_date}")
+        c.drawString(100, 710, "Generated On: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        # Table headers
+        y_position = 680
+        c.drawString(50, y_position, "ID")
+        c.drawString(100, y_position, "User ID")
+        c.drawString(200, y_position, "Message")
+        c.drawString(300, y_position, "Date")
+        c.drawString(450, y_position, "Camera Location")
+        c.drawString(550, y_position, "Status")
+
+        # Table rows
+        y_position -= 20
+        for item in report_data:
+            if y_position < 50:  # Start a new page if the content exceeds
+                c.showPage()
+                y_position = 750
+
+            c.drawString(50, y_position, str(item.analytics_id))
+            c.drawString(100, y_position, item.user_id)
+            c.drawString(200, y_position, item.message[:30])  # Truncate message for space
+            c.drawString(280, y_position, item.create_date)
+            c.drawString(450, y_position, item.camera_location)
+            c.drawString(550, y_position, item.status)
+            y_position -= 20
+
+        c.save()
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Report generated successfully.',
+            'pdf_path': pdf_path
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/analytics-viewall', methods=['POST'])
+def analytics_viewall():
+    """View all analytics records with optional filtering."""
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        row_count = data.get('row_count', 10)
+        analytics_id = data.get('analytics_id')
+
+        query = Analytics.query
+        if analytics_id:
+            query = query.filter(Analytics.analytics_id == analytics_id)
+
+        results = query.limit(row_count).all()
+
+        response_data = [
+            {
+                'log_image': item.log_image.replace('\\', '/'),
+                'log_video': item.log_video.replace('\\', '/'),
+                'create_date': item.create_date,
+                'message': item.message,
+                'camera_id': item.camera_id,
+                'camera_location': item.camera_location,
+                'action': item.action,
+                'status': item.status,
+                'user_id':item.user_id
+            }
+            for item in results
+        ]
+
+        return jsonify({
+            'status': 'success',
+            'data': response_data
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/analytics-delete', methods=['DELETE'])
+def analytics_delete():
+    """Delete a specific analytics record by ID."""
+    try:
+        data = request.get_json()
+        token = data.get('token', None)
+        analytics_id = data.get('analytics_id')
+
+        # Validate token
+        if not token or token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid Token'}), 400
+
+        # Find and delete the record
+        record = Analytics.query.get(analytics_id)
+        if record:
+            db.session.delete(record)
+            db.session.commit()
+            return jsonify({'status': 'success', 'message': 'Record deleted successfully'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Record not found'}), 400
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/analytics-delete-all', methods=['DELETE'])
+def analytics_delete_all():
+    """Delete all analytics records."""
+    try:
+        data = request.get_json()
+        token = data.get('token', None)
+
+        # Validate token
+        if not token or token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid Token'}), 400
+
+        # Delete all records
+        Analytics.query.delete()
+        db.session.commit()
+        return jsonify({'status': 'success', 'message': 'All records deleted successfully'}), 200
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
+@app.route('/fileupload', methods=['POST'])
+def handle_file_upload():
+    """Handle file upload."""
+    try:
+        # Log all files sent in the request
+        if 'file' not in request.files:
+            return jsonify({'status': 'error', 'message': 'No file part'}), 400
+
+        file = request.files['file']
+
+        # If no file is selected
+        if file.filename == '':
+            return jsonify({'status': 'error', 'message': 'No selected file'}), 400
+
+        # Check if the file is allowed
+        if not allowed_file(file.filename):
+            return jsonify({'status': 'error', 'message': 'File type not allowed'}), 400
+
+        # Secure the filename and save the file
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        return jsonify({
+            'status': 'success',
+            'message': f'File uploaded successfully: {filename}',
+            'file_path': file_path.replace('\\', '/')
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+########################################### Settings page ####################################################
+
+
+#camera
+@app.route("/settings-camera", methods=["POST"])
+#@jwt_required()
+def settings_camera():
+    cameras = Camera.query.all()
+    result = [
+        {
+            "camera_id": c.camera_id,
+            "camera_url": c.camera_url,
+            "camera_location": c.camera_location,
+            "status": c.status,
+        }
+        for c in cameras
+    ]
+    return jsonify(result), 200
+
+@app.route("/insert-camera", methods=["POST"])
+#@jwt_required()
+def insert_camera():
+    try:
+        data = request.get_json()
+        new_camera = Camera(
+            camera_id=data.get("camera_id",""),
+            camera_url=data["camera_url"],
+            camera_location=data.get("camera_location", ""),
+            status=data["status"]
+        )
+        db.session.add(new_camera)
+        db.session.commit()
+        return jsonify({"msg": "Camera added successfully"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/settings-camera-search", methods=["POST"])
+#@jwt_required()
+def settings_camera_search():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+        
+        if token!= app.config['JWT_SECRET_KEY']:
+            return jsonify({'status':'error','message':'Invalid Token'}), 400
+    
+        camera_id = data.get('camera_id')
+        camera_url = data.get('camera_url')
+        camera_location = data.get('camera_location')
+        status = data.get('status')
+        
+        query = Camera.query
+        
+        if camera_id:
+            query=query.filter(Camera.camera_id.like(f"%{camera_id}%"))
+        if camera_url:
+            query=query.filter(Camera.camera_url.like(f"%{camera_url}%"))
+        if camera_location:
+            query = query.filter(Camera.camera_location.like(f"%{camera_location}%"))
+        if status:
+            query=query.filter(Camera.status.like(f"%{status}%"))
+                    
+        search_results = query.all()
+        result = [
+            {
+                "camera_id": c.camera_id,
+                "camera_url": c.camera_url,
+                "camera_location": c.camera_location,
+                "status": c.status
+            }
+            for c in search_results
+        ]
+        return jsonify({
+            'status':'success',
+            'data':result
+        })
+    except Exception as e:
+        return jsonify({'status':'error','message':str(e)}),400
+
+@app.route("/settings-camera-delete", methods=["DELETE"])
+def settings_camera_delete():
+    try:
+        data = request.get_json()
+        token = data.get('token', None)
+
+        if not token or token != app.config['JWT_SECRET_KEY']:
+            return jsonify({"status": "error", "message": "Invalid Token"}), 400
+
+        camera = Camera.query.filter_by(camera_id=data.get("camera_id")).first()
+        if camera:
+            db.session.delete(camera)
+            db.session.commit()
+            return jsonify({"status": "success", "message": "Camera deleted"}), 200
+
+        return jsonify({"status": "error", "message": "Camera not found"}), 404
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/settings-camera-delete-all", methods=["DELETE"])
+def settings_camera_delete_all():
+    try:
+        data = request.get_json()
+        token = data.get('token', None)
+
+        if not token or token != app.config['JWT_SECRET_KEY']:
+            return jsonify({"status": "error", "message": "Invalid Token"}), 400
+
+        Camera.query.delete()  # Delete all camera records
+        db.session.commit()
+
+        return jsonify({"status": "success", "message": "All records deleted successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/settings-camera-edit", methods=["POST"])
+#@jwt_required()
+def settings_camera_edit():
+    data = request.get_json()
+    camera = Camera.query.filter_by(camera_id=data["camera_id"]).first()
+    if camera:
+        camera.camera_url = data["camera_url"]
+        camera.camera_location = data["camera_location"]
+        camera.status = data["status"]
+        db.session.commit()
+        return jsonify({"msg": "Camera updated"}), 200
+    return jsonify({"msg": "Camera not found"}), 404
+
+@app.route("/camera-viewall", methods=["GET"])
+#@jwt_required()
+def camera_viewall():
+    try:
+        cameras = Camera.query.all()
+        result = [
+            {
+                "camera_id": c.camera_id,
+                "camera_url": c.camera_url,
+                "camera_location": c.camera_location,
+                "status": c.status,
+            }
+            for c in cameras
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/settings-camera-close", methods=["POST"])
+@jwt_required()
+def settings_camera_close():
+    return jsonify({"msg": "Camera settings closed"}), 200
+
+
+#users
+
+
+@app.route("/settings-users", methods=["POST"])
+#@jwt_required()
+def settings_users():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        users = User.query.all()
+        result = [
+            {
+                "user_id": u.user_id,
+                "email": u.email,
+                "name": u.name,
+                "permission": u.permission,
+                "status": u.status,
+            }
+            for u in users
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/insert-user", methods=["POST"])
+#@jwt_required()
+def insert_user():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        new_user = User(
+            user_id=data["user_id"],
+            email=data["email"],
+            mob=data.get("mob"),
+            password=data["password"],
+            name=data["name"],
+            permission=data.get("permission"),
+            company=data.get("company"),
+            address=data.get("address"),
+            status=data.get("status"),
+        )
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({"msg": "User added successfully"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/user-viewall", methods=["GET"])
+#@jwt_required()
+def user_viewall():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        users = User.query.all()
+        result = [
+            {
+                "user_id": u.user_id,
+                "email": u.email,
+                "mob": u.mob,
+                "name": u.name,
+                "company": u.company,
+                "address": u.address,
+                "status": u.status,
+            }
+            for u in users
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/settings-users-search", methods=["POST"])
+#@jwt_required()
+def settings_users_search():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        query = User.query
+        if "user_id" in data:
+            query = query.filter(User.user_id.contains(data["user_id"]))
+        if "email" in data:
+            query = query.filter(User.email.contains(data["email"]))
+        if "name" in data:
+            query = query.filter(User.name.contains(data["name"]))
+        if "permission" in data:
+            query = query.filter(User.permission.contains(data["permission"]))
+        if "company" in data:
+            query = query.filter(User.company.contains(data["company"]))
+        result = [
+            {
+                "user_id": u.user_id,
+                "email": u.email,
+                "name": u.name,
+                "permission": u.permission,
+                "status": u.status,
+            }
+            for u in query.all()
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-users-delete", methods=["DELETE"])
+#@jwt_required()
+def settings_users_delete():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        query = User.query
+        if "user_id" in data:
+            query = query.filter(User.user_id == data["user_id"])
+        if "email" in data:
+            query = query.filter(User.email == data["email"])
+        if "name" in data:
+            query = query.filter(User.name == data["name"])
+        if "permission" in data:
+            query = query.filter(User.permission == data["permission"])
+        if "company" in data:
+            query = query.filter(User.company == data["company"])
+        user = query.first()
+        if user:
+            db.session.delete(user)
+            db.session.commit()
+            return jsonify({"msg": "User deleted"}), 200
+        return jsonify({"msg": "User not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-users-delete-all", methods=["DELETE"])
+#@jwt_required()
+def settings_users_delete_all():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        User.query.delete()
+        db.session.commit()
+        return jsonify({"msg": "All users deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/settings-users-edit", methods=["POST"])
+#@jwt_required()
+def settings_users_edit():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        user = User.query.filter_by(user_id=data["user_id"]).first()
+        if user:
+            user.email = data["email"]
+            user.name = data["name"]
+            user.permission = data["permission"]
+            user.status = data["status"]
+            db.session.commit()
+            return jsonify({"msg": "User updated"}), 200
+        return jsonify({"msg": "User not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-users-close", methods=["POST"])
+#@jwt_required()
+def settings_users_close():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        return jsonify({"msg": "User settings closed"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+#subscription
+
+@app.route("/settings-subscription", methods=["POST"])
+def settings_subscription():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        subscriptions = Subscription.query.all()
+        result = [
+            {
+                "subscription_id": s.subscription_id,
+                "device_id": s.device_id,
+                "user_id": s.user_id,
+                "expiry_date": s.expiry_date,
+                "camera_count": s.camera_count,
+                "ai_module": s.ai_module,
+                "status": s.status,
+            }
+            for s in subscriptions
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/insert-subscription", methods=["POST"])
+def insert_subscription():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        new_subscription = Subscription(
+            device_id=data["device_id"],
+            user_id=data["user_id"],
+            machine_id=data["machine_id"],
+            expiry_date=data["expiry_date"],
+            camera_count=data["camera_count"],
+            ai_module=data["ai_module"],
+            status=data["status"],
+        )
+        db.session.add(new_subscription)
+        db.session.commit()
+        return jsonify({"msg": "Subscription added successfully"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/subscription-viewall", methods=["GET"])
+def subscription_viewall():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        subscriptions = Subscription.query.all()
+        result = [
+            {
+                "subscription_id": s.subscription_id,
+                "device_id": s.device_id,
+                "user_id": s.user_id,
+                "machine_id": s.machine_id,
+                "expiry_date": s.expiry_date,
+                "camera_count": s.camera_count,
+                "ai_module": s.ai_module,
+                "status": s.status,
+            }
+            for s in subscriptions
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/settings-subscription-search", methods=["POST"])
+def settings_subscription_search():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        #query = Subscription.query.filter(Subscription.user_id.contains(data["query"]))
+        
+
+        query = Subscription.query
+        if "subscription_id" in data:
+            query = query.filter(Subscription.subscription_id.contains(data["subscription_id"]))
+        if "device_id" in data:
+            query = query.filter(Subscription.device_id.contains(data["device_id"]))
+        if "user_id" in data:
+            query = query.filter(Subscription.user_id.contains(data["user_id"]))
+        if "expiry_date" in data:
+            query = query.filter(Subscription.expiry_date.contains(data["expiry_date"]))
+        if "camera_count" in data:
+            query = query.filter(Subscription.camera_count.contains(data["camera_count"]))
+        if "ai_module" in data:
+            query = query.filter(Subscription.ai_module.contains(data["ai_module"]))
+        if "status" in data:
+            query = query.filter(Subscription.status.contains(data["status"]))
+    
+      
+
+        result = [
+            {
+                "subscription_id": s.subscription_id,
+                "device_id": s.device_id,
+                "user_id": s.user_id,
+                "expiry_date": s.expiry_date,
+                "camera_count": s.camera_count,
+                "ai_module": s.ai_module,
+                "status": s.status,
+            }
+            for s in query.all()
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-subscription-delete", methods=["DELETE"])
+def settings_subscription_delete():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        subscription = Subscription.query.filter_by(subscription_id=data["subscription_id"]).first()
+        if subscription:
+            db.session.delete(subscription)
+            db.session.commit()
+            return jsonify({"msg": "Subscription deleted"}), 200
+        return jsonify({"msg": "Subscription not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-subscription-delete-all", methods=["DELETE"])
+def settings_subscription_delete_all():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        Subscription.query.delete()
+        db.session.commit()
+        return jsonify({"msg": "All subscriptions deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/settings-subscription-edit", methods=["POST"])
+def settings_subscription_edit():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        subscription = Subscription.query.filter_by(subscription_id=data["subscription_id"]).first()
+        if subscription:
+            subscription.device_id = data["device_id"]
+            subscription.user_id = data["user_id"]
+            subscription.expiry_date = data["expiry_date"]
+            subscription.camera_count = data["camera_count"]
+            subscription.ai_module = data["ai_module"]
+            subscription.status = data["status"]
+            db.session.commit()
+            return jsonify({"msg": "Subscription updated"}), 200
+        return jsonify({"msg": "Subscription not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/settings-subscription-close", methods=["POST"])
+def settings_subscription_close():
+    try:
+        data = request.get_json()
+        token = data.get('token', app.config['JWT_SECRET_KEY'])
+
+        if token != app.config['JWT_SECRET_KEY']:
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 401
+
+        return jsonify({"msg": "Subscription settings closed"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
+    #app.run(host="0.0.0.0", port=5000, debug=True)
